@@ -64,12 +64,7 @@ cd ../backend
 cp .env.example .env
 ```
 
-Edit `.env` and add your OpenAI API key:
-```env
-OPENAI_API_KEY=sk-your-api-key-here
-```
-
-Or configure Ollama:
+configure Ollama:
 ```env
 LLM_PROVIDER=ollama
 OLLAMA_BASE_URL=http://localhost:11434
