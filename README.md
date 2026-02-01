@@ -416,4 +416,3 @@ For issues or questions:
 
 ---
 
-Built with ❤️ for educators and students
