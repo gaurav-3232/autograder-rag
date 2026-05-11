@@ -1,15 +1,18 @@
 # AutoGrader RAG System
 
-A production-ready, Canvas-style auto-grading platform with Retrieval-Augmented Generation (RAG) for intelligent, context-aware grading.
+A production-ready, Canvas-style auto-grading platform with Retrieval-Augmented Generation (RAG) for intelligent, context-aware grading — now enhanced with a fine-tuned DistilBERT model for semantic answer similarity scoring.
 
 ## 🎯 Features
 
-- **Automated Grading**: Upload submissions and get AI-powered grades with detailed feedback
-- **RAG-Enhanced**: Grounds grading decisions in reference documents and course materials
-- **Asynchronous Processing**: Non-blocking grading with Celery workers
-- **Strict JSON Output**: Validated, structured grading results
-- **Modular Architecture**: Clean separation between UI, API, and worker layers
-- **Swappable LLM**: Support for OpenAI or Ollama (local inference)
+- **Automated Grading:** Upload submissions and get AI-powered grades with detailed feedback
+- **RAG-Enhanced:** Grounds grading decisions in reference documents and course materials
+- **Semantic Grading:** Fine-tuned DistilBERT model scores student answers against correct answers with a similarity score (0–1)
+- **Asynchronous Processing:** Non-blocking grading with Celery workers
+- **Strict JSON Output:** Validated, structured grading results
+- **Modular Architecture:** Clean separation between UI, API, and worker layers
+- **Swappable LLM:** Support for OpenAI or Ollama (local inference)
+
+-----
 
 ## 🏗️ Architecture
 
@@ -28,7 +31,8 @@ A production-ready, Canvas-style auto-grading platform with Retrieval-Augmented 
        ├──────► MySQL (Assignments, Submissions, Grades)
        ├──────► MinIO (File Storage)
        ├──────► Qdrant (Vector DB for RAG)
-       └──────► Redis (Task Queue)
+       ├──────► Redis (Task Queue)
+       └──────► DistilBERT (Semantic Grading — /grade endpoint)
                    │
                    ▼
             ┌──────────────┐
@@ -36,11 +40,86 @@ A production-ready, Canvas-style auto-grading platform with Retrieval-Augmented 
             └──────────────┘
 ```
 
+-----
+
+## 🧠 ML Grading Layer (PyTorch + DistilBERT)
+
+AutoGrader includes a fine-tuned transformer model that scores student answers semantically — going beyond keyword matching to understand meaning.
+
+### How it works
+
+1. A student answer and correct answer are passed as a pair to DistilBERT
+1. The `[CLS]` token embedding (768-dim) is extracted — it represents the full meaning of both texts
+1. A custom grading head (Linear → ReLU → Dropout → Linear → Sigmoid) maps this to a score between 0 and 1
+1. The score is returned via the `/grade` endpoint
+
+### Architecture
+
+```
+[student_answer + correct_answer]
+        │
+        ▼
+  DistilBERT (frozen, 66M params)
+        │
+        ▼
+  [CLS] embedding (768-dim)
+        │
+        ▼
+  Grading Head (trainable, ~200K params)
+  Linear(768→256) → ReLU → Dropout(0.3) → Linear(256→1) → Sigmoid
+        │
+        ▼
+  Grade score (0.0 – 1.0)
+```
+
+### Fine-tuning approach
+
+- **Base model:** `distilbert-base-uncased` (HuggingFace)
+- **Strategy:** Frozen BERT + trainable head (only 0.3% of parameters trained)
+- **Optimizer:** AdamW (lr=2e-4, weight_decay=0.01)
+- **Loss:** MSELoss
+- **Training data:** Answer pairs with human-labelled similarity scores
+
+### API endpoint
+
+```bash
+POST /grade
+Content-Type: application/json
+
+{
+  "student_answer": "Mitochondria produces ATP energy for the cell.",
+  "correct_answer": "The mitochondria is the powerhouse of the cell."
+}
+
+# Response
+{
+  "score": 0.87,
+  "student_answer": "Mitochondria produces ATP energy for the cell.",
+  "correct_answer": "The mitochondria is the powerhouse of the cell."
+}
+```
+
+### PyTorch learning notebooks
+
+All foundational ML work is documented in `notebooks/`:
+
+|Notebook                      |Topic                                                  |
+|------------------------------|-------------------------------------------------------|
+|`01_tensors_foundations.ipynb`|Tensors — creation, reshape, indexing, matrix ops      |
+|`02_autograd.ipynb`           |Autograd — automatic differentiation, backward()       |
+|`03_neural_network.ipynb`     |nn.Module — layers, loss functions, training loop      |
+|`04_dataloader.ipynb`         |DataLoader — batching, custom datasets, train/val split|
+|`05_finetune.ipynb`           |Fine-tuning DistilBERT for answer similarity scoring   |
+
+-----
+
 ## 📋 Prerequisites
 
 - Docker & Docker Compose
 - Python 3.9+
 - OpenAI API key (or Ollama for local inference)
+
+-----
 
 ## 🚀 Quick Start
 
@@ -52,6 +131,7 @@ docker-compose up -d
 ```
 
 This starts:
+
 - MySQL (port 3306)
 - Redis (port 6379)
 - MinIO (ports 9000, 9001)
@@ -64,7 +144,8 @@ cd ../backend
 cp .env.example .env
 ```
 
-configure Ollama:
+Configure Ollama:
+
 ```env
 LLM_PROVIDER=ollama
 OLLAMA_BASE_URL=http://localhost:11434
@@ -83,7 +164,7 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
-The API will be available at `http://localhost:8000`
+The API will be available at http://localhost:8000
 
 ### 5. Start Celery Worker
 
@@ -96,22 +177,22 @@ celery -A app.worker.celery_app worker -Q grading --loglevel=info
 
 ### 6. Open Frontend
 
-Open `frontend/index.html` in your browser, or serve it with a simple HTTP server:
-
 ```bash
 cd frontend
 python -m http.server 8080
 ```
 
-Then navigate to `http://localhost:8080`
+Then navigate to http://localhost:8080
+
+-----
 
 ## 📖 Usage Guide
 
 ### Creating an Assignment
 
 1. Navigate to the **Assignments** tab
-2. Fill in the assignment title
-3. Define the rubric in JSON format:
+1. Fill in the assignment title
+1. Define the rubric in JSON format:
 
 ```json
 {
@@ -134,127 +215,149 @@ Then navigate to `http://localhost:8080`
 }
 ```
 
-4. Click **Create Assignment**
-5. Click **Add Reference** to upload course materials (PDFs, DOCX, TXT)
+1. Click **Create Assignment**
+1. Click **Add Reference** to upload course materials (PDFs, DOCX, TXT)
 
 ### Submitting Work
 
 1. Navigate to the **Submissions** tab
-2. Select an assignment
-3. Upload a submission file (PDF, DOCX, or TXT)
-4. Click **Submit for Grading**
-5. Watch the status change from "Queued" → "Grading" → "Done"
+1. Select an assignment
+1. Upload a submission file (PDF, DOCX, or TXT)
+1. Click **Submit for Grading**
+1. Watch the status change from “Queued” → “Grading” → “Done”
 
 ### Viewing Grades
 
-1. Once grading is complete, click **Explain** on a submission
-2. View:
-   - **Score**: Total points earned
-   - **Breakdown**: Points per rubric criterion
-   - **Feedback**: Detailed explanation
-   - **Citations**: References used in grading
+Once grading is complete, click **Explain** on a submission to view:
+
+- **Score:** Total points earned
+- **Breakdown:** Points per rubric criterion
+- **Feedback:** Detailed explanation
+- **Citations:** References used in grading
+
+-----
 
 ## 🔧 Technology Stack
 
 ### Backend
-- **FastAPI**: Modern Python web framework
-- **Pydantic**: Request/response validation
-- **MySQL**: Relational database (raw SQL, no ORM)
-- **Celery**: Distributed task queue
-- **Redis**: Message broker
-- **MinIO**: S3-compatible object storage
-- **Qdrant**: Vector database for RAG
-- **Sentence Transformers**: Text embeddings
-- **OpenAI/Ollama**: LLM inference
+
+|Technology                  |Purpose                              |
+|----------------------------|-------------------------------------|
+|FastAPI                     |Modern Python web framework          |
+|Pydantic                    |Request/response validation          |
+|MySQL                       |Relational database (raw SQL, no ORM)|
+|Celery                      |Distributed task queue               |
+|Redis                       |Message broker                       |
+|MinIO                       |S3-compatible object storage         |
+|Qdrant                      |Vector database for RAG              |
+|Sentence Transformers       |Text embeddings                      |
+|OpenAI / Ollama             |LLM inference                        |
+|**PyTorch**                 |**Deep learning framework**          |
+|**HuggingFace Transformers**|**DistilBERT fine-tuning**           |
 
 ### Frontend
-- **HTML5**: Semantic markup
-- **Tailwind CSS**: Utility-first styling
-- **Vanilla JavaScript**: No frameworks
-- **Fetch API**: HTTP requests
+
+- HTML5, Tailwind CSS, Vanilla JavaScript, Fetch API
+
+-----
 
 ## 📁 Project Structure
 
 ```
 autograder-rag/
 ├── infra/
-│   └── docker-compose.yml          # Infrastructure services
+│   └── docker-compose.yml
 │
 ├── backend/
 │   ├── app/
-│   │   ├── main.py                 # FastAPI application
-│   │   ├── config.py               # Pydantic settings
-│   │   ├── db.py                   # MySQL raw SQL helpers
+│   │   ├── main.py                 # FastAPI application + lifespan
+│   │   ├── config.py
+│   │   ├── db.py
 │   │   ├── routes/
-│   │   │   ├── assignments.py      # Assignment endpoints
-│   │   │   └── submissions.py      # Submission endpoints
+│   │   │   ├── assignments.py
+│   │   │   └── submissions.py      # Includes /grade endpoint
 │   │   ├── services/
-│   │   │   ├── storage.py          # MinIO integration
-│   │   │   ├── extract.py          # Text extraction
-│   │   │   ├── embeddings.py       # Embedding generation
-│   │   │   ├── rag.py              # Qdrant RAG service
-│   │   │   └── llm.py              # LLM grading service
+│   │   │   ├── storage.py
+│   │   │   ├── extract.py
+│   │   │   ├── embeddings.py
+│   │   │   ├── rag.py
+│   │   │   ├── llm.py
+│   │   │   └── grading.py          # DistilBERT grading service
 │   │   └── worker/
-│   │       ├── celery_app.py       # Celery configuration
-│   │       └── tasks.py            # Grading tasks
+│   │       ├── celery_app.py
+│   │       └── tasks.py
 │   ├── requirements.txt
 │   └── .env.example
 │
 ├── frontend/
-│   ├── index.html                  # Main UI
-│   ├── app.js                      # Application logic
-│   └── styles.css                  # Custom styles
+│   ├── index.html
+│   ├── app.js
+│   └── styles.css
+│
+├── notebooks/                      # PyTorch learning + ML experiments
+│   ├── 01_tensors_foundations.ipynb
+│   ├── 02_autograd.ipynb
+│   ├── 03_neural_network.ipynb
+│   ├── 04_dataloader.ipynb
+│   └── 05_finetune.ipynb           # DistilBERT fine-tuning
 │
 └── README.md
 ```
 
+-----
+
 ## 🗄️ Database Schema
 
-### assignments
-```sql
-id              INT PRIMARY KEY AUTO_INCREMENT
-title           VARCHAR(255)
-rubric          JSON
-created_at      TIMESTAMP
-```
+**assignments**
 
-### submissions
-```sql
-id              INT PRIMARY KEY AUTO_INCREMENT
-assignment_id   INT FOREIGN KEY
-filename        VARCHAR(255)
-s3_key          VARCHAR(500)
-extracted_text  LONGTEXT
-status          ENUM('queued', 'grading', 'done', 'error')
-created_at      TIMESTAMP
-```
+|Column    |Type                          |
+|----------|------------------------------|
+|id        |INT PRIMARY KEY AUTO_INCREMENT|
+|title     |VARCHAR(255)                  |
+|rubric    |JSON                          |
+|created_at|TIMESTAMP                     |
 
-### grades
-```sql
-id              INT PRIMARY KEY AUTO_INCREMENT
-submission_id   INT FOREIGN KEY UNIQUE
-score           INT
-breakdown       JSON
-feedback        TEXT
-citations       JSON
-created_at      TIMESTAMP
-```
+**submissions**
+
+|Column        |Type                                      |
+|--------------|------------------------------------------|
+|id            |INT PRIMARY KEY AUTO_INCREMENT            |
+|assignment_id |INT FOREIGN KEY                           |
+|filename      |VARCHAR(255)                              |
+|s3_key        |VARCHAR(500)                              |
+|extracted_text|LONGTEXT                                  |
+|status        |ENUM(‘queued’, ‘grading’, ‘done’, ‘error’)|
+|created_at    |TIMESTAMP                                 |
+
+**grades**
+
+|Column       |Type                          |
+|-------------|------------------------------|
+|id           |INT PRIMARY KEY AUTO_INCREMENT|
+|submission_id|INT FOREIGN KEY UNIQUE        |
+|score        |INT                           |
+|breakdown    |JSON                          |
+|feedback     |TEXT                          |
+|citations    |JSON                          |
+|created_at   |TIMESTAMP                     |
+
+-----
 
 ## 🔐 Security Considerations
 
-### For Production
+For production:
 
-1. **Enable MinIO TLS**: Set `MINIO_SECURE=true`
-2. **Secure MySQL**: Use strong passwords, restrict network access
-3. **API Authentication**: Add JWT or API key authentication
-4. **CORS**: Restrict allowed origins
-5. **Rate Limiting**: Add request throttling
-6. **Input Validation**: Sanitize file uploads
-7. **Environment Variables**: Use secrets management
+- Enable MinIO TLS: `MINIO_SECURE=true`
+- Secure MySQL with strong passwords and restricted network access
+- Add JWT or API key authentication
+- Restrict CORS allowed origins
+- Add request rate limiting
+- Sanitize file uploads
+- Use secrets management for environment variables
+
+-----
 
 ## 🧪 Testing
-
-### Test the API
 
 ```bash
 # Health check
@@ -263,30 +366,20 @@ curl http://localhost:8000/health
 # Create assignment
 curl -X POST http://localhost:8000/assignments/ \
   -H "Content-Type: application/json" \
+  -d '{"title": "Test Assignment", "rubric": {"criterion1": {"description": "Test", "max_points": 10}}}'
+
+# Grade a student answer
+curl -X POST http://localhost:8000/grade \
+  -H "Content-Type: application/json" \
   -d '{
-    "title": "Test Assignment",
-    "rubric": {"criterion1": {"description": "Test", "max_points": 10}}
+    "student_answer": "Mitochondria produces ATP energy for the cell.",
+    "correct_answer": "The mitochondria is the powerhouse of the cell."
   }'
-
-# List assignments
-curl http://localhost:8000/assignments/
 ```
 
-### Test File Upload
-
-```bash
-# Upload reference document
-curl -X POST http://localhost:8000/assignments/1/references \
-  -F "file=@reference.pdf"
-
-# Submit assignment
-curl -X POST "http://localhost:8000/submissions/?assignment_id=1" \
-  -F "file=@submission.pdf"
-```
+-----
 
 ## 🐛 Debugging
-
-### Check Service Health
 
 ```bash
 # MySQL
@@ -300,59 +393,58 @@ curl http://localhost:9000/minio/health/live
 
 # Qdrant
 curl http://localhost:6333/healthz
-```
 
-### View Logs
-
-```bash
-# Backend logs
+# Backend (debug mode)
 uvicorn app.main:app --reload --log-level debug
 
-# Worker logs
+# Worker (debug mode)
 celery -A app.worker.celery_app worker -Q grading --loglevel=debug
 
 # Docker logs
 docker-compose -f infra/docker-compose.yml logs -f
 ```
 
+-----
+
 ## 📊 Performance Tuning
 
-### Celery Workers
-- Scale horizontally: `celery -A app.worker.celery_app worker -Q grading --concurrency=4`
-- Use multiple queues for different priorities
+**Celery Workers**
 
-### Qdrant
+- Scale horizontally: `celery -A app.worker.celery_app worker -Q grading --concurrency=4`
+
+**Qdrant**
+
 - Adjust `top_k` in RAG search based on context needs
 - Use HNSW indexing for faster searches
 
-### Embeddings
-- Use smaller models for speed: `all-MiniLM-L6-v2` (default)
-- Use larger models for accuracy: `all-mpnet-base-v2`
+**DistilBERT Grading**
+
+- Model loads once at startup via FastAPI lifespan — no per-request loading overhead
+- Unfreeze BERT layers and retrain with more data to improve accuracy ceiling
+
+-----
 
 ## 🔄 Extending the System
 
-### Add New Document Types
+**Improve grading accuracy**
 
-Edit `app/services/extract.py`:
+- Unfreeze DistilBERT and fine-tune end-to-end with more labelled answer pairs
+- Switch to `sentence-transformers/all-mpnet-base-v2` for better embeddings
+
+**Add new document types**
+
 ```python
+# app/services/extract.py
 @staticmethod
 def extract_from_html(file_data: bytes) -> str:
     from bs4 import BeautifulSoup
-    soup = BeautifulSoup(file_data, 'html.parser')
-    return soup.get_text()
+    return BeautifulSoup(file_data, 'html.parser').get_text()
 ```
 
-### Custom Grading Logic
+**Add authentication**
 
-Edit `app/services/llm.py` to modify the grading prompt or add domain-specific rules.
-
-### Add Authentication
-
-Use FastAPI dependencies:
 ```python
-from fastapi import Depends, HTTPException
 from fastapi.security import HTTPBearer
-
 security = HTTPBearer()
 
 @router.get("/protected")
@@ -361,53 +453,45 @@ async def protected_route(token: str = Depends(security)):
     pass
 ```
 
+-----
+
 ## 🤝 Contributing
 
-This is a production-ready template. Customize as needed:
+Customisation ideas:
 
-1. Add user authentication
-2. Implement role-based access control
-3. Add analytics and reporting
-4. Integrate with LMS systems (Canvas, Moodle)
-5. Add plagiarism detection
-6. Support more file formats
+- Add user authentication and role-based access control
+- Add analytics and reporting dashboard
+- Integrate with LMS systems (Canvas, Moodle)
+- Add plagiarism detection
+- Support more file formats
+
+-----
 
 ## 📝 License
 
-MIT License - feel free to use in your projects.
+MIT License — feel free to use in your projects.
+
+-----
 
 ## 🆘 Troubleshooting
 
-### Issue: "Connection refused" errors
-**Solution**: Ensure all Docker services are running: `docker-compose ps`
+|Issue                      |Solution                                                           |
+|---------------------------|-------------------------------------------------------------------|
+|“Connection refused” errors|Ensure all Docker services are running: `docker-compose ps`        |
+|Grading stays in “queued”  |Check if Celery worker is running and connected to Redis           |
+|“LLM returned invalid JSON”|Check OpenAI API key or Ollama connection                          |
+|RAG returns no results     |Ensure reference documents are uploaded and indexed                |
+|MySQL connection errors    |Wait for MySQL to fully initialise: `docker-compose logs mysql`    |
+|Grading model not loaded   |Ensure `load_model()` is called in FastAPI lifespan (see `main.py`)|
 
-### Issue: Grading stays in "queued" status
-**Solution**: Check if Celery worker is running and connected to Redis
-
-### Issue: "LLM returned invalid JSON"
-**Solution**: Check your OpenAI API key or Ollama connection. Try increasing temperature or adjusting the prompt.
-
-### Issue: RAG returns no results
-**Solution**: Ensure reference documents have been uploaded and indexed for the assignment
-
-### Issue: MySQL connection errors
-**Solution**: Wait for MySQL to fully initialize (check with `docker-compose logs mysql`)
-
-## 📧 Support
-
-For issues or questions:
-1. Check the logs (`docker-compose logs`, worker logs, API logs)
-2. Verify all services are healthy
-3. Review the configuration in `.env`
-4. Test each component individually
+-----
 
 ## 🎓 Learning Resources
 
-- [FastAPI Documentation](https://fastapi.tiangolo.com/)
-- [Celery Documentation](https://docs.celeryproject.org/)
-- [Qdrant Documentation](https://qdrant.tech/documentation/)
-- [MinIO Documentation](https://min.io/docs/minio/linux/index.html)
-- [Sentence Transformers](https://www.sbert.net/)
-
----
-
+- [FastAPI Documentation](https://fastapi.tiangolo.com)
+- [Celery Documentation](https://docs.celeryq.dev)
+- [Qdrant Documentation](https://qdrant.tech/documentation)
+- [MinIO Documentation](https://min.io/docs)
+- [Sentence Transformers](https://www.sbert.net)
+- [PyTorch Documentation](https://pytorch.org/docs)
+- [HuggingFace Transformers](https://huggingface.co/docs/transformers)
