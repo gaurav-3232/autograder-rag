@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
+from app.services.grading import grade_answer
 
 from app.db import (
     insert_submission,
@@ -11,7 +12,7 @@ from app.db import (
 )
 from app.services.storage import storage_service
 from app.services.extract import text_extractor
-from app.worker.tasks import grade_submission
+from app.worker.tasks import grade_submission as grade_submission_task
 
 router = APIRouter(prefix="/submissions", tags=["submissions"])
 
@@ -36,6 +37,32 @@ class GradeResponse(BaseModel):
     created_at: str
 
 
+class GradeRequest(BaseModel):
+    student_answer: str = Field(
+        ...,
+        min_length=1,
+        max_length=2000,
+        description="The student's submitted answer text"
+    )
+    correct_answer: str = Field(
+        ...,
+        min_length=1,
+        max_length=2000,
+        description="The reference correct answer text"
+    )
+
+
+class BertGradeResponse(BaseModel):
+    score: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Similarity score between 0.0 (no match) and 1.0 (perfect match)"
+    )
+    student_answer: str
+    correct_answer: str
+
+
 @router.post("/", response_model=SubmissionResponse)
 async def create_submission(
     assignment_id: int,
@@ -47,16 +74,16 @@ async def create_submission(
         assignment = get_assignment(assignment_id)
         if not assignment:
             raise HTTPException(status_code=404, detail="Assignment not found")
-        
+
         # Read file
         file_data = await file.read()
-        
+
         # Upload to MinIO
         s3_key = storage_service.upload_file(file_data, file.filename)
-        
+
         # Extract text
         extracted_text = text_extractor.extract_text(file_data, file.filename)
-        
+
         # Insert into database
         submission_id = insert_submission(
             assignment_id=assignment_id,
@@ -64,13 +91,13 @@ async def create_submission(
             s3_key=s3_key,
             extracted_text=extracted_text
         )
-        
+
         # Enqueue grading task
-        grade_submission.delay(submission_id)
-        
+        grade_submission_task.delay(submission_id)
+
         # Get submission
         submission = get_submission(submission_id)
-        
+
         return SubmissionResponse(
             id=submission['id'],
             assignment_id=submission['assignment_id'],
@@ -78,7 +105,7 @@ async def create_submission(
             status=submission['status'],
             created_at=str(submission['created_at'])
         )
-        
+
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -112,10 +139,10 @@ async def get_submission_detail(submission_id: int):
     submission = get_submission(submission_id)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
-    
+
     # Try to get grade
     grade = get_grade_by_submission(submission_id)
-    
+
     return SubmissionResponse(
         id=submission['id'],
         assignment_id=submission['assignment_id'],
@@ -133,7 +160,7 @@ async def get_grade(submission_id: int):
     grade = get_grade_by_submission(submission_id)
     if not grade:
         raise HTTPException(status_code=404, detail="Grade not found")
-    
+
     return GradeResponse(
         id=grade['id'],
         submission_id=grade['submission_id'],
@@ -142,4 +169,29 @@ async def get_grade(submission_id: int):
         feedback=grade['feedback'],
         citations=grade['citations'],
         created_at=str(grade['created_at'])
+    )
+
+
+@router.post(
+    "/grade",
+    response_model=BertGradeResponse,
+    summary="Grade a student answer",
+    description="Compares a student answer to the correct answer using a fine-tuned DistilBERT model. Returns a similarity score between 0 and 1."
+)
+async def bert_grade_answer(payload: GradeRequest) -> BertGradeResponse:
+    """Grade a student answer against a correct answer using DistilBERT."""
+    try:
+        score = grade_answer(
+            student_answer=payload.student_answer,
+            correct_answer=payload.correct_answer
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Grading failed: {str(e)}")
+
+    return BertGradeResponse(
+        score=score,
+        student_answer=payload.student_answer,
+        correct_answer=payload.correct_answer
     )

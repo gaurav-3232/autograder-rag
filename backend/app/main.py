@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
+from app.services.grading import load_model
 
 from app.config import get_settings
 from app.db import init_database
@@ -16,7 +17,14 @@ async def lifespan(app: FastAPI):
     print("Initializing database...")
     init_database()
     print("Database initialized successfully")
+
+    # Startup: Load grading model
+    print("Loading grading model...")
+    load_model()
+    print("Grading model loaded successfully")
+
     yield
+
     # Shutdown: cleanup if needed
     print("Shutting down...")
 
